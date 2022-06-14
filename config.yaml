@@ -1,0 +1,8 @@
+pcap:
+  device: "eth0"
+  filters: "proto GRE and ((ip[54:4]&0xffffff00)=0x0123abcd or (ip[58:4]&0xffffff00=0x1234abcd))"
+
+assistant:
+  staff_patterns:
+  - pattern: "\\d{4}"
+  ditto: ""

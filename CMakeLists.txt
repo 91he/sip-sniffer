@@ -1,0 +1,43 @@
+cmake_minimum_required(VERSION 3.5)
+project(sip-sniffer)
+
+set(CMAKE_MODULE_PATH "${CMAKE_MODULE_PATH};${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+
+include(CheckIncludeFile)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(prefix "/usr/local")
+set(exec_prefix "/usr/local")
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GTHREAD REQUIRED gthread-2.0)
+pkg_check_modules(LIBNET QUIET libnet)
+
+if(NOT LIBNET_FOUND)
+  set(LIBNET_FIND_VERSION 1)
+  find_package(LIBNET REQUIRED)
+  find_program(LIBNET_CONFIG libnet-config)
+  if(LIBNET_FOUND AND LIBNET_CONFIG)
+    execute_process(COMMAND ${LIBNET_CONFIG} --defines OUTPUT_VARIABLE LIBNET_CFLAGS_OTHER)
+    execute_process(COMMAND ${LIBNET_CONFIG} --cflags OUTPUT_VARIABLE LIBNET_CFLAGS)
+    execute_process(COMMAND ${LIBNET_CONFIG} --libs OUTPUT_VARIABLE LIBNET_LDFLAGS)
+    string(REPLACE "\n" "" LIBNET_CFLAGS_OTHER "${LIBNET_CFLAGS_OTHER}")
+    string(REPLACE "\n" "" LIBNET_CFLAGS "${LIBNET_CFLAGS}")
+    string(REPLACE "\n" "" LIBNET_LDFLAGS "${LIBNET_LDFLAGS}")
+  else()
+    message("required libnet not found.")
+    return(-1)
+  endif()
+else()
+  string(REPLACE ";" " " LIBNET_CFLAGS "${LIBNET_CFLAGS}")
+  string(REPLACE ";" " " LIBNET_CFLAGS_OTHER "${LIBNET_CFLAGS_OTHER}")
+  string(REPLACE ";" " " LIBNET_LDFLAGS "${LIBNET_LDFLAGS}")
+endif()
+#message("${LIBNET_CFLAGS_OTHER}")
+
+#string(REPLACE ";" " " GTHREAD_LINK_LIBRARIES "${GTHREAD_LINK_LIBRARIES}")
+#string(REPLACE ";" " " LIBNET_LINK_LIBRARIES "${LIBNET_LINK_LIBRARIES}")
+
+set(HAVE_LIBGTHREAD_2_0 ${GTHREAD_FOUND})
+
+add_subdirectory(libnids)
+add_subdirectory(src)
