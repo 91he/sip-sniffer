@@ -1,7 +1,10 @@
 set(CMAKE_CXX_COMPILER "/usr/bin/clang++-11")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++20 -stdlib=libc++")
 
-pkg_check_modules(LIBPCAP REQUIRED libpcap)
+pkg_check_modules(LIBPCAP libpcap)
+if(NOT LIBPCAP_FOUND)
+  message(FATAL_ERROR "no required package: libpcap")
+endif()
 
 string(REPLACE ";" " " GTHREAD_LDFLAGS "${GTHREAD_LDFLAGS}")
 string(REPLACE ";" " " LIBPCAP_LDFLAGS "${LIBPCAP_LDFLAGS}")

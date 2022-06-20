@@ -1,3 +1,7 @@
+sip:
+  cidr: "192.168.3.0/24" #sip cidr
+  port: 5060
+
 pcap:
   device: "eth0"
   filters: "proto GRE and ((ip[54:4]&0xffffff00)=0x0123abcd or (ip[58:4]&0xffffff00=0x1234abcd))"
@@ -5,4 +9,7 @@ pcap:
 assistant:
   staff_patterns:
   - pattern: "\\d{4}"
-  ditto: ""
+  ditto:
+    bid: ""
+    category: ""
+    endpoint: ""

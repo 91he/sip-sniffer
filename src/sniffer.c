@@ -100,7 +100,7 @@ void udp_callback(struct tuple4 *a, char *data, int len, char *orig) {
     go_write(a, data, len);
 }
 
-int do_cap() {
+int do_cap(const char *dev, char *filter) {
     char errbuf[PCAP_ERRBUF_SIZE];
 #if 0
     pcap_if_t *devs = NULL;
@@ -112,21 +112,25 @@ int do_cap() {
     }
 #endif
 
-#if 0
-    pcap_t *desc = pcap_create("eth0", errbuf);
-    if (desc == NULL) {
-        fprintf(stderr, "can't find device %s\n", "eth0")
-        return 0;
+#if 1
+    if (dev != NULL) {
+        pcap_t *desc = pcap_create(dev, errbuf);
+        if (desc == NULL) {
+            fprintf(stderr, "can't find device %s\n", "eth0");
+            return -1;
+        }
+        nids_params.pcap_desc = desc;
     }
-    nids_params.pcap_desc = desc;
 #else
     // here we can alter libnids params, for instance:
     // nids_params.n_hosts=256;
     char filename[] = "/tmp/55.pcap";
     nids_params.filename = filename;
 #endif
-    nids_params.pcap_filter = "proto GRE and ((ip[54:4]&0xffffff00)=0x64592200 "
-                              "or (ip[58:4]&0xffffff00)=0x64592200)";
+    nids_params.pcap_filter = filter;
+    // nids_params.pcap_filter = "proto GRE and
+    // ((ip[54:4]&0xffffff00)=0x64592200 "
+    //                           "or (ip[58:4]&0xffffff00)=0x64592200)";
     //"proto GRE and (ip[54:4]&0x64592231 or ip[58:4]&0x64592231)";
 
     if (!nids_init()) {
