@@ -19,15 +19,16 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"sip-sniffer/src/asr"
 	"strconv"
 	"strings"
-	"sync"
 	"unsafe"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/pion/rtp/v2"
 	"github.com/pion/sdp/v3"
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
 	"gopkg.in/yaml.v3"
@@ -54,16 +55,9 @@ type StaffPattern struct {
 	Pattern string `yaml:"pattern"`
 }
 
-type DittoConfig struct {
-	Bid      string `yaml:"bid"`
-	Category string `yaml:"category"`
-	Profile  string `yaml:"profile"`
-	Endpoint string `yaml:"endpoint"`
-}
-
 type AssistantConfig struct {
-	StaffPatterns []StaffPattern `yaml:"staff_patterns"`
-	Ditto         DittoConfig    `yaml:"ditto"`
+	StaffPatterns []StaffPattern  `yaml:"staff_patterns"`
+	Ditto         asr.DittoConfig `yaml:"ditto"`
 }
 
 type SnifferConfig struct {
@@ -74,7 +68,7 @@ type SnifferConfig struct {
 
 type Sniffer struct {
 	Config        string `clop:"short;long" usage:"server config path" valid:"required"`
-	Level         string `clop:"short;long" usage:"log level" default:"INFO"`
+	Level         string `clop:"short;long" usage:"log level" default:"info"`
 	config        SnifferConfig
 	CIDR          *net.IPNet
 	StaffMatchers []*regexp.Regexp
@@ -93,6 +87,21 @@ func (s *Sniffer) init() {
 		panic(errors.New("fail parsing ss config"))
 	}
 
+	switch s.Level {
+	case "debug":
+		zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	case "info":
+		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	case "warn":
+		zerolog.SetGlobalLevel(zerolog.WarnLevel)
+	case "error":
+		zerolog.SetGlobalLevel(zerolog.ErrorLevel)
+	case "fatal":
+		zerolog.SetGlobalLevel(zerolog.FatalLevel)
+	default:
+		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	}
+
 	var cidr *net.IPNet
 	if _, cidr, err = net.ParseCIDR(s.config.Sip.CIDR); err != nil {
 		panic(errors.New("fail parsing cidr"))
@@ -102,11 +111,8 @@ func (s *Sniffer) init() {
 
 	var matchers []*regexp.Regexp
 	for _, sp := range s.config.Assistant.StaffPatterns {
-		if exp, err := regexp.Compile(sp.Pattern); err != nil {
-			panic(fmt.Errorf("fail compiling regexp: %s", sp.Pattern))
-		} else {
-			matchers = append(matchers, exp)
-		}
+		exp := regexp.MustCompile(sp.Pattern)
+		matchers = append(matchers, exp)
 	}
 
 	s.StaffMatchers = matchers
@@ -158,15 +164,17 @@ func (s *Sniffer) MatchSip(tuple *C.struct_tuple4, buf *C.char, length C.int) (m
 			return
 		}
 		if sip.IsResponse {
+			//fmt.Printf("xxxxxxxxxxxxx %v, %v\n", sip.Method.String(), sip.ResponseCode)
 			if sip.Method == layers.SIPMethodInvite && (sip.ResponseCode == 200 || sip.ResponseCode == 183) {
 				dialogInfo, err := DialogInfoFromSIP(sip)
 				if err != nil {
+					log.Error().Msgf("fail getting dialog info: %v", err)
 					return
 				}
 
 				ok, direction := s.MatchStaff(dialogInfo)
 				if !ok {
-					log.Info().Msgf("staff do not match, drop sip request. Info: %v\n", dialogInfo)
+					log.Info().Msgf("-staff do not match, drop sip request. Info: %v\n", dialogInfo)
 					return
 				}
 
@@ -206,9 +214,10 @@ func (s *Sniffer) MatchSip(tuple *C.struct_tuple4, buf *C.char, length C.int) (m
 						}
 						ctx, cancel := context.WithCancel(context.Background())
 						dialog = &Dialog{
-							CallerData: make(chan []byte, 8),
-							CalleeData: make(chan []byte, 8),
+							CallerData: make(chan *rtp.Packet, 8),
+							CalleeData: make(chan *rtp.Packet, 8),
 							direction:  direction,
+							callID:     dialogInfo.CallID,
 							fromID:     dialogInfo.FromID,
 							toID:       dialogInfo.ToID,
 							codec:      am.Codec,
@@ -233,57 +242,99 @@ func (s *Sniffer) MatchSip(tuple *C.struct_tuple4, buf *C.char, length C.int) (m
 						if !dialog.inDialog {
 							dialog.inDialog = true
 							log.Info().Msgf("WOW, we did it. id: %s, dialog=%v\n", dialogID, dialog)
-							go func() {
-								callerOnce, calleeOnce := sync.Once{}, sync.Once{}
-								var (
-									offer  *os.File
-									answer *os.File
-								)
 
-								if true {
-									offer, err = os.Create(fmt.Sprintf("Caller-%s.pcm", dialog.fromID))
-									if err != nil {
-										return
-									}
-									defer offer.Close()
-									answer, err = os.Create(fmt.Sprintf("Callee-%s.pcm", dialog.toID))
-									if err != nil {
-										return
-									}
-									defer answer.Close()
-								}
+							var (
+								staff        string
+								customer     string
+								staffData    chan *rtp.Packet
+								customerData chan *rtp.Packet
+							)
 
-								for {
-									select {
-									case data := <-dialog.CallerData:
-										callerOnce.Do(func() {
-											role := "staff"
-											if dialog.direction == SIP_IN {
-												role = "customer"
-											}
-											log.Info().Msg(role)
-											//Send start request
-										})
-										if true {
-											offer.Write(data)
-										}
-									case data := <-dialog.CalleeData:
-										calleeOnce.Do(func() {
-											role := "staff"
-											if dialog.direction == SIP_OUT {
-												role = "customer"
-											}
-											log.Info().Msg(role)
-											//Send start request
-										})
-										if true {
-											answer.Write(data)
-										}
-									case <-dialog.ctx.Done():
-										break
-									}
-								}
-							}()
+							switch dialog.direction {
+							case SIP_OUT:
+								staff = dialog.fromID
+								customer = dialog.toID
+								staffData = dialog.CallerData
+								customerData = dialog.CalleeData
+							case SIP_IN:
+								staff = dialog.toID
+								customer = dialog.fromID
+								staffData = dialog.CalleeData
+								customerData = dialog.CallerData
+							}
+
+							staffAsr := &asr.DittoClient{
+								CallId: dialog.callID,
+								Caller: staff,
+								Callee: customer,
+								Role:   "staff",
+								Config: s.config.Assistant.Ditto,
+								Data:   staffData,
+							}
+
+							customerAsr := &asr.DittoClient{
+								CallId: dialog.callID,
+								Caller: staff,
+								Callee: customer,
+								Role:   "customer",
+								Config: s.config.Assistant.Ditto,
+								Data:   customerData,
+							}
+
+							staffAsr.Start(dialog.ctx)
+							customerAsr.Start(dialog.ctx)
+
+							// go func() {
+							// 	callerOnce, calleeOnce := sync.Once{}, sync.Once{}
+							// 	var (
+							// 		offer  *os.File
+							// 		answer *os.File
+							// 	)
+
+							// 	if true {
+							// 		offer, err = os.Create(fmt.Sprintf("Caller-%s.pcm", dialog.fromID))
+							// 		if err != nil {
+							// 			return
+							// 		}
+							// 		defer offer.Close()
+							// 		answer, err = os.Create(fmt.Sprintf("Callee-%s.pcm", dialog.toID))
+							// 		if err != nil {
+							// 			return
+							// 		}
+							// 		defer answer.Close()
+							// 	}
+
+							// 	for {
+							// 		select {
+							// 		case data := <-dialog.CallerData:
+							// 			callerOnce.Do(func() {
+							// 				role := "staff"
+							// 				if dialog.direction == SIP_IN {
+							// 					role = "customer"
+							// 				}
+							// 				log.Info().Msg(role)
+							// 				//Send start request
+							// 			})
+							// 			if true {
+							// 				offer.Write(data.Payload)
+							// 			}
+							// 		case data := <-dialog.CalleeData:
+							// 			calleeOnce.Do(func() {
+							// 				role := "staff"
+							// 				if dialog.direction == SIP_OUT {
+							// 					role = "customer"
+							// 				}
+							// 				log.Info().Msg(role)
+							// 				//Send start request
+							// 			})
+							// 			if true {
+							// 				answer.Write(data.Payload)
+							// 			}
+							// 		case <-dialog.ctx.Done():
+							// 			break
+							// 		}
+							// 	}
+							// }()
 						} else {
 							log.Info().Msgf("WOW, we update it. id: %s, dialog=%v\n", dialogID, dialog)
 						}
@@ -295,11 +346,11 @@ func (s *Sniffer) MatchSip(tuple *C.struct_tuple4, buf *C.char, length C.int) (m
 				if sip.Headers["content-type"][0] == "application/sdp" {
 					sdpParser, err := sdp.NewJSEPSessionDescription(true)
 					if err != nil {
-						log.Error().Msg("new sdp parser error")
+						log.Error().Msgf("new sdp parser error: %v", err)
 						return
 					}
 					if err := sdpParser.Unmarshal(sip.Payload()); err != nil {
-						log.Error().Msg("parse sdp error")
+						log.Error().Msgf("parse sdp error: %v", err)
 						return
 					}
 
@@ -316,6 +367,7 @@ func (s *Sniffer) MatchSip(tuple *C.struct_tuple4, buf *C.char, length C.int) (m
 						return
 					}
 
+					//log.Info().Msgf("---------%v", dialogInfo)
 					inviteID, first := dialogInfo.DialogID, dialogInfo.First
 					if first {
 						Invites[inviteID] = &Invite{Addr: am.Addr, Port: am.Port}
@@ -334,9 +386,6 @@ func (s *Sniffer) MatchSip(tuple *C.struct_tuple4, buf *C.char, length C.int) (m
 							log.Warn().Msg("WARN: dialog not exist")
 						}
 					}
-					// for _, m := range sdpParser.MediaDescriptions {
-					// 	fmt.Println("REQUEST", sdpParser.ConnectionInformation.Address.Address, m.MediaName.Port.Value)
-					// }
 				}
 			}
 		}
@@ -351,9 +400,10 @@ type Invite struct {
 }
 
 type Dialog struct {
-	CallerData chan []byte
-	CalleeData chan []byte
+	CallerData chan *rtp.Packet
+	CalleeData chan *rtp.Packet
 	direction  SipDirection
+	callID     string
 	fromID     string
 	toID       string
 	saddr      uint32
@@ -369,6 +419,7 @@ type Dialog struct {
 type DialogInfo struct {
 	DialogID string
 	First    bool
+	CallID   string
 	FromID   string
 	ToID     string
 }
@@ -381,17 +432,13 @@ type AudioMediaInfo struct {
 
 var (
 	saddr        uint32
-	userFinder   = regexp.MustCompile("sip:(.+)@.*;tag=([^$;]+)")
+	userFinder   = regexp.MustCompile("sip:(.+)@.+?(?:.*;tag=([^$;]+))?")
 	Invites      = map[string]*Invite{}
 	Dialogs      = map[string]*Dialog{}
 	Callers      = map[Invite]*Dialog{}
 	Callees      = map[Invite]*Dialog{}
 	nativeEndian binary.ByteOrder
 )
-
-func (d Dialog) MatchTuple(tuple *C.struct_tuple4) bool {
-	return false
-}
 
 func (d *Dialog) Cancel() {
 	d.cancel()
@@ -474,9 +521,12 @@ func DialogInfoFromSIP(sip *layers.SIP) (*DialogInfo, error) {
 
 	dialogID := fmt.Sprintf("%s#%s#%s", sip.GetCallID(), fromTag, toTag)
 
+	//fmt.Printf("%s:%s, to-tag=%s\n", fromID, toID, toTag)
+
 	return &DialogInfo{
 		DialogID: dialogID,
 		First:    toTag == "",
+		CallID:   sip.GetCallID(),
 		FromID:   fromID,
 		ToID:     toID,
 	}, nil
@@ -538,8 +588,8 @@ func go_write(tuple *C.struct_tuple4, buf *C.char, length C.int) {
 			packet := &rtp.Packet{}
 			err := packet.Unmarshal(C.GoBytes(unsafe.Pointer(buf), length))
 			if err == nil {
-				dialog.CallerData <- packet.Payload
-				fmt.Printf("主->: caller data from %s\n", dialog.fromID)
+				dialog.CallerData <- packet
+				log.Debug().Msgf("主->: caller data from %s\n", dialog.fromID)
 			}
 			return
 		}
@@ -547,8 +597,8 @@ func go_write(tuple *C.struct_tuple4, buf *C.char, length C.int) {
 			packet := &rtp.Packet{}
 			err := packet.Unmarshal(C.GoBytes(unsafe.Pointer(buf), length))
 			if err == nil {
-				dialog.CallerData <- packet.Payload
-				fmt.Printf("被<-: caller data from %s\n", dialog.fromID)
+				dialog.CallerData <- packet
+				log.Debug().Msgf("被<-: caller data from %s\n", dialog.fromID)
 			}
 			return
 		}
@@ -556,8 +606,8 @@ func go_write(tuple *C.struct_tuple4, buf *C.char, length C.int) {
 			packet := &rtp.Packet{}
 			err := packet.Unmarshal(C.GoBytes(unsafe.Pointer(buf), length))
 			if err == nil {
-				dialog.CalleeData <- packet.Payload
-				fmt.Printf("被<-: callee data from %s\n", dialog.toID)
+				dialog.CalleeData <- packet
+				log.Debug().Msgf("被<-: callee data from %s\n", dialog.toID)
 			}
 			return
 		}
@@ -565,8 +615,8 @@ func go_write(tuple *C.struct_tuple4, buf *C.char, length C.int) {
 			packet := &rtp.Packet{}
 			err := packet.Unmarshal(C.GoBytes(unsafe.Pointer(buf), length))
 			if err == nil {
-				dialog.CalleeData <- packet.Payload
-				fmt.Printf("主->: callee data from %s\n", dialog.toID)
+				dialog.CalleeData <- packet
+				log.Debug().Msgf("主->: callee data from %s\n", dialog.toID)
 			}
 			return
 		}

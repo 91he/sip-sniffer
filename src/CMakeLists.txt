@@ -22,6 +22,6 @@ aux_source_directory(. SRC_LIST)
 
 set(CGO_CFLAGS "-I${PROJECT_SOURCE_DIR}/libnids")
 set(CGO_LDFLAGS "-L${PROJECT_BINARY_DIR}/libnids -lnids ${LIBNET_LDFLAGS} ${GTHREAD_LDFLAGS} ${LIBPCAP_LDFLAGS}")
-add_custom_target(gocap ALL COMMAND ${CMAKE_COMMAND} -E env CGO_CFLAGS=${CGO_CFLAGS} CGO_LDFLAGS=${CGO_LDFLAGS} go build -o gocap sip-sniffer/src)
+add_custom_target(goss ALL COMMAND ${CMAKE_COMMAND} -E env CGO_CFLAGS=${CGO_CFLAGS} CGO_LDFLAGS=${CGO_LDFLAGS} go build -o goss sip-sniffer/src/cmd)
 #add_executable(sip-sniffer ./printall.cpp)
 #add_executable(sniff ./sniff.c)

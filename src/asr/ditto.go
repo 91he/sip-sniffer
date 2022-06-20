@@ -4,20 +4,44 @@ import (
 	"context"
 	"fmt"
 
-	"sip-sniffer/src"
-
 	"github.com/gorilla/websocket"
+	"github.com/pion/rtp/v2"
 	"github.com/rs/zerolog/log"
 	"gopkg.in/mgo.v2/bson"
 )
 
 var Sn = fmt.Sprintf(`%x`, string(bson.NewObjectId()))
 
+var PayloadTypes = map[uint8]PayloadType{
+	0:  {"PCMU/8000", "mulaw", 8000},
+	3:  {"GSM/8000", "gsm", 8000},
+	4:  {"G723/8000", "g723_1", 8000},
+	8:  {"PCMA/8000", "alaw", 8000},
+	9:  {"G722/8000", "g722", 8000},
+	11: {"L16/44100", "s16be", 44100},
+	18: {"G729/8000", "g729", 8000},
+}
+
+type PayloadType struct {
+	Name       string
+	Format     string
+	SampleRate int
+}
+
+type DittoConfig struct {
+	Bid      string `yaml:"bid"`
+	Category string `yaml:"category"`
+	Profile  string `yaml:"profile"`
+	Endpoint string `yaml:"endpoint"`
+}
+
 type StartRequest struct {
 	Sn                string   `json:"sn" yaml:"-"`
 	Action            string   `json:"action" yaml:"-"`
 	Profile           string   `json:"profile" yaml:"profile"`
+	Format            string   `json:"format" yaml:"format"`
 	SampleRate        int      `json:"sample_rate" yaml:"sample_rate"`
+	Category          *string  `json:"category" yaml:"category"`
 	Id                string   `json:"id" yaml:"-"`
 	Call              Call     `json:"call" yaml:"call"`
 	Token             string   `json:"token" yaml:"-"`
@@ -57,28 +81,43 @@ type AsrPayload struct {
 }
 
 type DittoClient struct {
-	CallId     string
-	Caller     string
-	Callee     string
-	Role       string
-	SampleRate int
-	Config     src.DittoConfig
-	Data       chan []byte
+	CallId string
+	Caller string
+	Callee string
+	Role   string
+	Format string
+	Config DittoConfig
+	Data   chan *rtp.Packet
 }
 
-func (dc *DittoClient) createStartRequest() StartRequest {
+func (dc *DittoClient) createStartRequest(format string, sampleRate int) StartRequest {
 	call := Call{
 		Role:   dc.Role,
 		Callee: dc.Callee,
 		Caller: dc.Caller,
 	}
 
+	var (
+		bid      *string
+		category *string
+	)
+
+	if dc.Config.Bid != "" {
+		bid = &dc.Config.Bid
+	}
+
+	if dc.Config.Category != "" {
+		bid = &dc.Config.Category
+	}
+
 	return StartRequest{
 		Sn:                Sn,
 		Action:            "Start",
 		Profile:           dc.Config.Profile,
-		SampleRate:        dc.SampleRate,
-		Bid:               &dc.Config.Bid,
+		Format:            format,
+		SampleRate:        sampleRate,
+		Bid:               bid,
+		Category:          category,
 		Id:                dc.CallId,
 		Call:              call,
 		VadAggressiveness: nil, //TODO
@@ -88,20 +127,51 @@ func (dc *DittoClient) createStartRequest() StartRequest {
 }
 
 func (dc *DittoClient) Start(ctx context.Context) {
+	role, uid := dc.Role, dc.Caller
+	if role != "staff" {
+		uid = dc.Callee
+	}
+
 	go func() {
 		for {
+			var (
+				pt         uint8
+				format     string
+				sampleRate int
+				data       []byte
+			)
+		INNER:
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case pkg := <-dc.Data:
+					if plt, ok := PayloadTypes[pkg.PayloadType]; ok {
+						format = plt.Format
+						sampleRate = plt.SampleRate
+						pt = pkg.PayloadType
+						data = pkg.Payload
+						break INNER
+					} else {
+						log.Info().Msgf("unsupport audio payload type: %v", pkg.PayloadType)
+					}
+				}
+			}
+
 			conn, _, err := websocket.DefaultDialer.Dial(dc.Config.Endpoint, nil)
 			if err != nil {
-				log.Error().Msgf("%s connect asr server failed", dc.Role)
+				log.Error().Msgf("%s(%s) connect asr server failed", role, uid)
 				return
 			}
-			log.Info().Msgf("%s connect asr server successful", dc.Role)
+			log.Info().Msgf("%s(%s) connect asr server successful", role, uid)
 
-			startRequest := dc.createStartRequest()
+			startRequest := dc.createStartRequest(format, sampleRate)
 
 			if err := conn.WriteJSON(startRequest); err != nil {
-				log.Error().Msgf("%s send start request failed", dc.Role)
+				log.Error().Msgf("%s(%s) send start request failed", role, uid)
 				return
+			} else {
+				conn.WriteMessage(websocket.BinaryMessage, data)
 			}
 
 			innerCtx, cancel := context.WithCancel(ctx)
@@ -111,10 +181,15 @@ func (dc *DittoClient) Start(ctx context.Context) {
 					select {
 					case <-innerCtx.Done():
 						return
-					case buf := <-dc.Data:
-						if err := conn.WriteMessage(websocket.BinaryMessage, buf); err != nil {
+					case pkg := <-dc.Data:
+						if err := conn.WriteMessage(websocket.BinaryMessage, pkg.Payload); err != nil {
 							cancel()
 							return
+						}
+
+						if pkg.PayloadType != pt {
+							log.Warn().Msgf("%s(%s) incompatible format.", role, uid)
+							//TODO: break and restart websocket
 						}
 					}
 				}
@@ -136,7 +211,7 @@ func (dc *DittoClient) Start(ctx context.Context) {
 						if resp.Action == "EndOfSentence" || resp.Action == "ResultUpdated" {
 							if !(resp.Payload.Text == "。" || resp.Payload.Text == "" || resp.Payload.Text == " ") {
 								log.Debug().Msgf("Id:[%v]|StaffId:[%v]|Role:[%v]Action:[%v] --- Recv:[%v]\n",
-									dc.CallId, dc.Caller, dc.Role, resp.Action, resp.Payload.Text)
+									dc.CallId, dc.Caller, role, resp.Action, resp.Payload.Text)
 							}
 						} else if resp.Action == "TranscribeCompleted" {
 							cancel()
@@ -148,14 +223,14 @@ func (dc *DittoClient) Start(ctx context.Context) {
 
 			select {
 			case <-ctx.Done():
-				log.Info().Msgf("%s asr stopped", dc.Role)
+				log.Info().Msgf("%s(%s) asr stopped", role, uid)
 				return
 			case <-innerCtx.Done():
 				if ctx.Err() != nil {
 					return
 				}
 			}
-			log.Info().Msgf("%s disconnected with asr server and will retry soon", dc.Role)
+			log.Info().Msgf("%s(%s) disconnected with asr server and will retry soon", role, uid)
 		}
 	}()
 }

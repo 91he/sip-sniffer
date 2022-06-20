@@ -1,15 +1,17 @@
 sip:
-  cidr: "192.168.3.0/24" #sip cidr
-  port: 5060
+  cidr: "100.89.34.0/24" #sip cidr
+  #port: 5060
 
 pcap:
   device: "eth0"
-  filters: "proto GRE and ((ip[54:4]&0xffffff00)=0x0123abcd or (ip[58:4]&0xffffff00=0x1234abcd))"
+  #filter: "proto GRE and ((ip[54:4]&0xffffff00)=0x0123abcd or (ip[58:4]&0xffffff00=0x1234abcd))"
+  filter:  "proto GRE and ((ip[54:4]&0xffffff00)=0x64592200 or (ip[58:4]&0xffffff00)=0x64592200)"
 
 assistant:
   staff_patterns:
-  - pattern: "\\d{4}"
+  - pattern: "^\\d{4}$"
   ditto:
     bid: ""
+    profile: "xxx"
     category: ""
-    endpoint: ""
+    endpoint: "ws://140.143.181.148:20184/v1/asr/ws"

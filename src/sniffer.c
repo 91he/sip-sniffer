@@ -112,11 +112,11 @@ int do_cap(const char *dev, char *filter) {
     }
 #endif
 
-#if 1
+#if 0
     if (dev != NULL) {
         pcap_t *desc = pcap_create(dev, errbuf);
         if (desc == NULL) {
-            fprintf(stderr, "can't find device %s\n", "eth0");
+            fprintf(stderr, "can't find device %s\n", dev);
             return -1;
         }
         nids_params.pcap_desc = desc;
